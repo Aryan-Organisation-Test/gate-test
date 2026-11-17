@@ -1,0 +1,71 @@
+name: Integration Tests
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '**/*.go'
+      - '.github/workflows/integration-test.yml'
+  pull_request:
+    branches:
+      - '*'
+    paths:
+      - '**/*.go'
+      - '.github/workflows/integration-test.yml'
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run, including one still waiting for approval.
+# Pushes to master each get their own group (by sha), so they are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Holds pull request runs until a required reviewer of the `integration_tests` environment
+  # approves them, on a small runner so no 32gb-runner sits idle while waiting. An empty
+  # environment name means no environment, so these runs start straight away:
+  # - pushes to master;
+  # - staging -> master pull requests from this repository (a fork's `staging` branch is still gated).
+  approve:
+    name: Approve Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'master' && github.event.pull_request.head.repo.full_name == github.repository) && 'integration_tests' || '' }}
+    outputs:
+      attempt: ${{ github.run_attempt }}
+    steps:
+      - run: echo "Approved -- running the integration tests"
+
+  integration-tests:
+    needs: approve
+    # TEST REPO: real workflow uses 32gb-runner
+    runs-on: ubuntu-latest
+    # "Re-run failed jobs" does not re-run `approve`, so its attempt no longer matches and the
+    # gate applies again here. "Re-run all jobs" is gated by `approve` itself.
+    environment: ${{ github.event_name == 'pull_request' && needs.approve.outputs.attempt != github.run_attempt && !(github.head_ref == 'staging' && github.base_ref == 'master' && github.event.pull_request.head.repo.full_name == github.repository) && 'integration_tests' || '' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tests mount the whole checkout into a privileged container; keep the token out of .git/config.
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: "worker/go.mod"
+          cache-dependency-path: "worker/go.sum"
+
+      - name: Download Go dependencies
+        working-directory: ./worker
+        run: go mod download
+
+      # TEST REPO: stands in for the DinD integration test. Commit a file named FAIL to make it fail.
+      - name: Run Docker In Docker Container Tests
+        working-directory: ./worker
+        run: |
+          if [ -f ../FAIL ]; then echo "FAIL file present -- failing on purpose"; exit 1; fi
+          go test -v ./tests -run 'TestDinDIntegration'
