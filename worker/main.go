@@ -1,3 +1,3 @@
 package main
 
-func main() {}
+func main() { _ = "staging to master test" }
